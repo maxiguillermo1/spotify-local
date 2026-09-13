@@ -1,0 +1,13 @@
+.DS_Store
+/.run/
+/.swiftpm/
+/**/.build/
+/**/DerivedData/
+/**/*.xcuserstate
+/**/xcuserdata/
+/**/*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata

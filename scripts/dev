@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# Start the Mac companion (idempotent) and launch the iPhone app.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export SPOTIFY_LOCAL_ROOT="$ROOT"
+# shellcheck source=lib/common.sh
+source "$ROOT/scripts/lib/common.sh"
+spotify_local_init
+
+SUMMARY_COMPANION="not started"
+SUMMARY_MUSIC="missing"
+SUMMARY_SIMULATOR="not ready"
+SUMMARY_APP="not launched"
+SUMMARY_BRIDGE="mock"
+
+build_companion() {
+  local logfile="$SPOTIFY_LOCAL_LOG_DIR/companion-build.log"
+  spotify_local_log "Building Mac companion"
+  if [[ "$SPOTIFY_LOCAL_VERBOSE" == "1" ]]; then
+    swift build --package-path "$SPOTIFY_LOCAL_COMPANION_PACKAGE" -c release --build-path "$SPOTIFY_LOCAL_RUN_DIR/companion-build"
+  else
+    swift build --package-path "$SPOTIFY_LOCAL_COMPANION_PACKAGE" -c release --build-path "$SPOTIFY_LOCAL_RUN_DIR/companion-build" >"$logfile" 2>&1 || {
+      tail -n 40 "$logfile" >&2
+      spotify_local_die "Could not build the Mac companion. See $logfile"
+    }
+  fi
+}
+
+companion_binary() {
+  printf '%s\n' "$SPOTIFY_LOCAL_RUN_DIR/companion-build/release/SpotifyLocalCompanion"
+}
+
+start_companion() {
+  mkdir -p "$SPOTIFY_LOCAL_MUSIC_DIR"
+  if spotify_local_companion_running; then
+    SUMMARY_COMPANION="running"
+    spotify_local_log "Companion already running"
+    return 0
+  fi
+  build_companion
+  local bin logfile
+  bin="$(companion_binary)"
+  [[ -x "$bin" ]] || spotify_local_die "Companion binary missing at $bin"
+  logfile="$SPOTIFY_LOCAL_LOG_DIR/companion.log"
+  SPOTIFY_LOCAL_RUN_DIR="$SPOTIFY_LOCAL_RUN_DIR" \
+    SPOTIFY_LOCAL_MUSIC_DIR="$SPOTIFY_LOCAL_MUSIC_DIR" \
+    "$bin" >>"$logfile" 2>&1 &
+  local pid=$!
+  sleep 0.2
+  if ! spotify_local_pid_alive "$pid" && ! spotify_local_companion_running; then
+    tail -n 40 "$logfile" >&2
+    spotify_local_die "Mac companion failed to start. See $logfile"
+  fi
+  # If the process exited 0 because a sibling already held the pid, treat as success.
+  if ! spotify_local_companion_running; then
+    # Give the companion a moment to write its pid file.
+    sleep 0.3
+  fi
+  if ! spotify_local_companion_running; then
+    tail -n 40 "$logfile" >&2
+    spotify_local_die "Mac companion started then exited. See $logfile"
+  fi
+  SUMMARY_COMPANION="running"
+}
+
+ensure_music_folder() {
+  mkdir -p "$SPOTIFY_LOCAL_MUSIC_DIR"
+  if [[ -d "$SPOTIFY_LOCAL_MUSIC_DIR" ]]; then
+    SUMMARY_MUSIC="available"
+  fi
+}
+
+require_xcode() {
+  if spotify_local_prepare_xcode && xcrun --find simctl >/dev/null 2>&1 && command -v xcodebuild >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+launch_mac_ui() {
+  local logfile="$SPOTIFY_LOCAL_LOG_DIR/app-build.log"
+  local bin="$SPOTIFY_LOCAL_RUN_DIR/app-build/release/SpotifyLocalApp"
+  spotify_local_log "Building Spotify Local Mac UI"
+  if [[ "$SPOTIFY_LOCAL_VERBOSE" == "1" ]]; then
+    swift build --package-path "$SPOTIFY_LOCAL_MAC_APP_PACKAGE" -c release --build-path "$SPOTIFY_LOCAL_RUN_DIR/app-build"
+  else
+    swift build --package-path "$SPOTIFY_LOCAL_MAC_APP_PACKAGE" -c release --build-path "$SPOTIFY_LOCAL_RUN_DIR/app-build" >"$logfile" 2>&1 || {
+      tail -n 50 "$logfile" >&2
+      spotify_local_die "Could not build the Spotify Local app. See $logfile"
+    }
+  fi
+  [[ -x "$bin" ]] || spotify_local_die "App binary missing at $bin"
+
+  if spotify_local_mac_app_running; then
+    spotify_local_stop_mac_app
+    sleep 0.2
+  fi
+
+  mkdir -p "$SPOTIFY_LOCAL_MAC_APP_BUNDLE/Contents/MacOS"
+  mkdir -p "$SPOTIFY_LOCAL_MAC_APP_BUNDLE/Contents/Resources"
+  cp "$bin" "$SPOTIFY_LOCAL_MAC_APP_BUNDLE/Contents/MacOS/SpotifyLocalApp"
+  cp "$SPOTIFY_LOCAL_MAC_APP_PACKAGE/Info.plist" "$SPOTIFY_LOCAL_MAC_APP_BUNDLE/Contents/Info.plist"
+
+  if spotify_local_mac_app_running; then
+    open "$SPOTIFY_LOCAL_MAC_APP_BUNDLE"
+  else
+    open "$SPOTIFY_LOCAL_MAC_APP_BUNDLE"
+    sleep 0.4
+  fi
+  SUMMARY_APP="launched"
+  SUMMARY_SIMULATOR="Mac window"
+}
+
+print_summary_mac() {
+  printf '\nSpotify Local\n\n'
+  printf '%s Mac companion running\n' "$(spotify_local_ok)"
+  printf '%s Music folder available\n' "$(spotify_local_ok)"
+  printf '%s Spotify Local launched\n' "$(spotify_local_ok)"
+  printf '\nLocal bridge: connected\n'
+}
+
+pick_simulator() {
+  local line udid name state
+  line="$(python3 "$ROOT/scripts/lib/pick_simulator.py")"
+  IFS=$'\t' read -r udid name state <<<"$line"
+  printf '%s\n' "$udid" >"$SPOTIFY_LOCAL_RUN_DIR/simulator.udid"
+  printf '%s\n' "$name" >"$SPOTIFY_LOCAL_RUN_DIR/simulator.name"
+  printf '%s\t%s\t%s\n' "$udid" "$name" "$state"
+}
+
+boot_simulator() {
+  local udid name state
+  IFS=$'\t' read -r udid name state <<<"$(pick_simulator)"
+  SUMMARY_SIMULATOR="$name"
+  if [[ "$state" != "Booted" ]]; then
+    spotify_local_log "Booting $name ($udid)"
+    xcrun simctl boot "$udid" >/dev/null 2>&1 || true
+    xcrun simctl bootstatus "$udid" -b >/dev/null
+  fi
+  open -a Simulator --args -CurrentDeviceUDID "$udid" >/dev/null 2>&1 || open -a Simulator >/dev/null 2>&1 || true
+  printf '%s\t%s\n' "$udid" "$name"
+}
+
+build_ios() {
+  local udid="$1"
+  local logfile="$SPOTIFY_LOCAL_LOG_DIR/ios-build.log"
+  spotify_local_log "Building iOS app for $udid"
+  local args=(
+    xcodebuild
+    -project "$SPOTIFY_LOCAL_IOS_PROJECT"
+    -scheme SpotifyLocal
+    -configuration Debug
+    -destination "platform=iOS Simulator,id=$udid"
+    -derivedDataPath "$SPOTIFY_LOCAL_RUN_DIR/DerivedData"
+    CODE_SIGNING_ALLOWED=NO
+    CODE_SIGNING_REQUIRED=NO
+    build
+  )
+  if [[ "$SPOTIFY_LOCAL_VERBOSE" == "1" ]]; then
+    "${args[@]}"
+  else
+    "${args[@]}" -quiet >"$logfile" 2>&1 || {
+      printf '\nBuild failed. Last lines:\n' >&2
+      tail -n 50 "$logfile" >&2
+      spotify_local_die "Could not build the iPhone app. See $logfile"
+    }
+  fi
+}
+
+app_bundle_path() {
+  printf '%s\n' "$SPOTIFY_LOCAL_RUN_DIR/DerivedData/Build/Products/Debug-iphonesimulator/SpotifyLocal.app"
+}
+
+install_and_launch() {
+  local udid="$1"
+  local app
+  app="$(app_bundle_path)"
+  [[ -d "$app" ]] || spotify_local_die "Built app missing at $app"
+  spotify_local_log "Installing Spotify Local on $udid"
+  xcrun simctl install "$udid" "$app" >/dev/null
+  xcrun simctl launch "$udid" "$SPOTIFY_LOCAL_BUNDLE_ID" >/dev/null
+  SUMMARY_APP="launched"
+}
+
+print_summary() {
+  local name
+  name="$(tr -d '\n' <"$SPOTIFY_LOCAL_RUN_DIR/simulator.name" 2>/dev/null || true)"
+  [[ -n "$name" ]] || name="$SUMMARY_SIMULATOR"
+  printf '\nSpotify Local\n\n'
+  printf '%s Mac companion running\n' "$(spotify_local_ok)"
+  printf '%s Music folder available\n' "$(spotify_local_ok)"
+  printf '%s %s simulator ready\n' "$(spotify_local_ok)" "$name"
+  printf '%s Spotify Local launched\n' "$(spotify_local_ok)"
+  printf '\nLocal bridge: connected\n'
+}
+
+start_companion
+ensure_music_folder
+if require_xcode; then
+  IFS=$'\t' read -r SIM_UDID SIM_NAME <<<"$(boot_simulator)"
+  build_ios "$SIM_UDID"
+  install_and_launch "$SIM_UDID"
+  print_summary
+else
+  launch_mac_ui
+  print_summary_mac
+fi

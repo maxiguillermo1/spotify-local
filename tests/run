@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Run the important Phase 1 tests.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+printf 'Spotify Local tests\n\n'
+
+printf '• Core (path security, protocol, search)\n'
+swift run --package-path "$ROOT/shared" --build-path "$ROOT/.run/core-build" SpotifyLocalCoreChecks
+
+printf '\n• CLI parser\n'
+bash "$ROOT/tests/cli/test_parse.sh"
+
+printf '\n• Simulator picker\n'
+python3 "$ROOT/tests/cli/test_pick_simulator.py"
+
+printf '\n• Duplicate companion prevention\n'
+bash "$ROOT/tests/cli/test_companion_lock.sh"
+
+printf '\nAll tests passed.\n'

@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Short human-readable status for the development environment.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export SPOTIFY_LOCAL_ROOT="$ROOT"
+# shellcheck source=lib/common.sh
+source "$ROOT/scripts/lib/common.sh"
+spotify_local_init
+
+companion="stopped"
+if spotify_local_companion_running; then
+  companion="running"
+fi
+
+music="$(spotify_local_expand_home "$SPOTIFY_LOCAL_MUSIC_DIR")"
+tracks="0"
+if [[ -d "$SPOTIFY_LOCAL_MUSIC_DIR" ]]; then
+  tracks="$(find "$SPOTIFY_LOCAL_MUSIC_DIR" -type f \( \
+    -iname '*.mp3' -o -iname '*.m4a' -o -iname '*.aac' -o -iname '*.wav' \
+    -o -iname '*.aiff' -o -iname '*.aif' -o -iname '*.flac' -o -iname '*.alac' \
+  \) 2>/dev/null | wc -l | tr -d ' ')"
+fi
+
+bonjour="not advertised yet"
+simulator="not running"
+app="not running"
+
+if spotify_local_has_simctl; then
+  sim_name="$(tr -d '\n' <"$SPOTIFY_LOCAL_RUN_DIR/simulator.name" 2>/dev/null || true)"
+  sim_udid="$(tr -d '\n' <"$SPOTIFY_LOCAL_RUN_DIR/simulator.udid" 2>/dev/null || true)"
+  if [[ -n "$sim_udid" ]]; then
+    state="$(xcrun simctl list devices 2>/dev/null | awk -v id="$sim_udid" '$0 ~ id {print}' | sed -n 's/.*(\(Booted\|Shutdown\|Shutting Down\)).*/\1/p' | head -n 1)"
+    if [[ -n "$sim_name" ]]; then
+      simulator="$sim_name"
+      [[ "$state" == "Booted" ]] && simulator="$sim_name (booted)"
+    fi
+    if [[ "$state" == "Booted" ]]; then
+      if xcrun simctl spawn "$sim_udid" launchctl print system 2>/dev/null | grep -q "$SPOTIFY_LOCAL_BUNDLE_ID"; then
+        app="running"
+      elif xcrun simctl listapps "$sim_udid" 2>/dev/null | grep -q "$SPOTIFY_LOCAL_BUNDLE_ID"; then
+        app="installed"
+      fi
+    fi
+  else
+    line="$(python3 "$ROOT/scripts/lib/pick_simulator.py" 2>/dev/null || true)"
+    if [[ -n "$line" ]]; then
+      IFS=$'\t' read -r _ name state <<<"$line"
+      simulator="$name"
+      [[ "$state" == "Booted" ]] && simulator="$name (booted)"
+    fi
+  fi
+else
+  simulator="Xcode required"
+  if spotify_local_mac_app_running; then
+    app="running (Mac window)"
+  fi
+fi
+
+cli="not installed"
+if command -v spotify >/dev/null 2>&1 && grep -q "SPOTIFY_LOCAL_CLI=1" "$(command -v spotify)" 2>/dev/null; then
+  cli="installed"
+elif command -v spotify-local >/dev/null 2>&1; then
+  cli="installed as spotify-local"
+fi
+
+printf 'Spotify Local\n\n'
+printf '%-20s %s\n' "Mac companion" "$companion"
+printf '%-20s %s\n' "Music folder" "$music"
+printf '%-20s %s\n' "Tracks" "$tracks"
+printf '%-20s %s\n' "Bonjour" "$bonjour"
+printf '%-20s %s\n' "Simulator" "$simulator"
+printf '%-20s %s\n' "iOS app" "$app"
+printf '%-20s %s\n' "CLI" "$cli"
+printf '%-20s %s\n' "iOS library" "mock"

@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Developer launcher for Spotify Local.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export SPOTIFY_LOCAL_ROOT="$ROOT"
+# shellcheck source=lib/common.sh
+source "$ROOT/scripts/lib/common.sh"
+# shellcheck source=lib/parse.sh
+source "$ROOT/scripts/lib/parse.sh"
+
+usage() {
+  cat <<'EOF'
+Spotify Local
+
+Usage:
+  spotify local            Start the Mac companion and launch the iPhone app
+  spotify local status     Show a short environment summary
+  spotify local stop       Stop processes started by Spotify Local
+  spotify local doctor     Check prerequisites and explain fixes
+  spotify local logs       Tail local development logs
+  spotify local --verbose  Same as start, with extra diagnostic output
+EOF
+}
+
+if ! spotify_local_parse "$@"; then
+  printf '%s\n' "$SPOTIFY_LOCAL_PARSE_ERROR" >&2
+  exit 2
+fi
+
+spotify_local_init
+export SPOTIFY_LOCAL_VERBOSE
+
+case "$SPOTIFY_LOCAL_COMMAND" in
+  help)
+    usage
+    ;;
+  start)
+    exec "$ROOT/scripts/dev"
+    ;;
+  stop)
+    exec "$ROOT/scripts/stop"
+    ;;
+  status)
+    exec "$ROOT/scripts/status"
+    ;;
+  doctor)
+    exec "$ROOT/scripts/doctor"
+    ;;
+  logs)
+    mkdir -p "$SPOTIFY_LOCAL_LOG_DIR"
+    if ! ls "$SPOTIFY_LOCAL_LOG_DIR"/* >/dev/null 2>&1; then
+      printf 'No logs yet. Run:  spotify local\n'
+      exit 0
+    fi
+    exec tail -n 200 -F "$SPOTIFY_LOCAL_LOG_DIR"/*.log
+    ;;
+  *)
+    spotify_local_die "Unhandled command: $SPOTIFY_LOCAL_COMMAND"
+    ;;
+esac

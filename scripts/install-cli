@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# Install or remove the repository-owned `spotify` command.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN_SOURCE="$ROOT/bin/spotify"
+INSTALL_DIR="${SPOTIFY_LOCAL_INSTALL_DIR:-$HOME/.local/bin}"
+TARGET="$INSTALL_DIR/spotify"
+ALT_TARGET="$INSTALL_DIR/spotify-local"
+MARKER_BEGIN="# >>> spotify-local >>>"
+MARKER_END="# <<< spotify-local <<<"
+CLI_MARKER="SPOTIFY_LOCAL_CLI=1"
+
+usage() {
+  cat <<'EOF'
+Install the Spotify Local developer command.
+
+Usage:
+  ./scripts/install-cli
+  ./scripts/install-cli --uninstall
+
+After a clean install, `spotify local` works from any directory.
+EOF
+}
+
+is_our_cli() {
+  local path="$1"
+  [[ -e "$path" ]] || return 1
+  if [[ -L "$path" ]]; then
+    local dest
+    dest="$(readlink "$path")"
+    [[ "$(basename "$dest")" == "spotify" ]] || return 1
+  fi
+  grep -q "$CLI_MARKER" "$path" 2>/dev/null
+}
+
+shell_rc_path() {
+  printf '%s\n' "${SPOTIFY_LOCAL_SHELL_RC:-$HOME/.zshrc}"
+}
+
+path_block() {
+  cat <<EOF
+$MARKER_BEGIN
+# Added by Spotify Local. Safe to remove with: ./scripts/install-cli --uninstall
+if [[ -d "$INSTALL_DIR" ]]; then
+  case ":\$PATH:" in
+    *":$INSTALL_DIR:"*) ;;
+    *) export PATH="$INSTALL_DIR:\$PATH" ;;
+  esac
+fi
+$MARKER_END
+EOF
+}
+
+rc_has_block() {
+  local rc="$1"
+  [[ -f "$rc" ]] && grep -q "$MARKER_BEGIN" "$rc"
+}
+
+ensure_path_block() {
+  local rc
+  rc="$(shell_rc_path)"
+  if [[ -f "$rc" ]] && grep -q "$MARKER_BEGIN" "$rc"; then
+    return 0
+  fi
+  # The user's shell already puts ~/.local/bin on PATH. Only write a block
+  # when that directory would otherwise be missing from PATH.
+  mkdir -p "$(dirname "$rc")"
+  touch "$rc"
+  if [[ ":$PATH:" == *":$INSTALL_DIR:"* ]]; then
+    return 0
+  fi
+  {
+    printf '\n'
+    path_block
+  } >>"$rc"
+  printf 'Added %s to PATH in %s\n' "$INSTALL_DIR" "$rc"
+}
+
+remove_path_block() {
+  local rc
+  rc="$(shell_rc_path)"
+  [[ -f "$rc" ]] || return 0
+  grep -q "$MARKER_BEGIN" "$rc" || return 0
+  local tmp
+  tmp="$(mktemp)"
+  awk -v begin="$MARKER_BEGIN" -v end="$MARKER_END" '
+    $0 == begin {skip=1; next}
+    $0 == end {skip=0; next}
+    skip != 1 {print}
+  ' "$rc" >"$tmp"
+  mv "$tmp" "$rc"
+}
+
+write_passthrough_wrapper() {
+  local original="$1"
+  local dest="$2"
+  cat >"$dest" <<EOF
+#!/usr/bin/env bash
+# $CLI_MARKER
+# Spotify Local shim: handles \`spotify local\`, otherwise calls the existing spotify command.
+set -euo pipefail
+ROOT="$ROOT"
+ORIGINAL="$original"
+if [[ "\${1:-}" == "local" || "\${1:-}" == "--help" || "\${1:-}" == "-h" ]]; then
+  exec "\$ROOT/bin/spotify" "\$@"
+fi
+for arg in "\$@"; do
+  if [[ "\$arg" == "local" ]]; then
+    exec "\$ROOT/bin/spotify" "\$@"
+  fi
+done
+exec "\$ORIGINAL" "\$@"
+EOF
+  chmod +x "$dest"
+}
+
+install_cli() {
+  [[ -x "$BIN_SOURCE" ]] || chmod +x "$BIN_SOURCE"
+  mkdir -p "$INSTALL_DIR"
+
+  local existing=""
+  existing="$(type -P spotify 2>/dev/null || true)"
+
+  if [[ -e "$TARGET" ]] && is_our_cli "$TARGET"; then
+    ln -sfn "$BIN_SOURCE" "$TARGET"
+    ln -sfn "$BIN_SOURCE" "$ALT_TARGET"
+    ensure_path_block
+    printf 'Spotify Local CLI already installed.\n'
+    printf 'Command:  spotify local\n'
+    return 0
+  fi
+
+  if [[ -e "$TARGET" ]] && ! is_our_cli "$TARGET"; then
+    printf 'A different command already exists at %s\n' "$TARGET" >&2
+    printf 'Left it untouched. Installed:  spotify-local local\n' >&2
+    ln -sfn "$BIN_SOURCE" "$ALT_TARGET"
+    ensure_path_block
+    return 1
+  fi
+
+  if [[ -n "$existing" && "$existing" != "$TARGET" ]]; then
+    if is_our_cli "$existing"; then
+      ln -sfn "$BIN_SOURCE" "$TARGET"
+      ln -sfn "$BIN_SOURCE" "$ALT_TARGET"
+      ensure_path_block
+      printf 'Updated Spotify Local CLI.\nCommand:  spotify local\n'
+      return 0
+    fi
+    write_passthrough_wrapper "$existing" "$TARGET"
+    ln -sfn "$BIN_SOURCE" "$ALT_TARGET"
+    ensure_path_block
+    printf 'Found an existing `spotify` command at:\n  %s\n\n' "$existing"
+    printf 'Installed a shim at:\n  %s\n\n' "$TARGET"
+    printf '`spotify local` now launches this project.\n'
+    printf 'Other `spotify ...` commands still go to the original tool.\n'
+    return 0
+  fi
+
+  ln -sfn "$BIN_SOURCE" "$TARGET"
+  ln -sfn "$BIN_SOURCE" "$ALT_TARGET"
+  ensure_path_block
+  printf 'Installed Spotify Local.\n\n'
+  printf '  spotify local\n\n'
+  if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+    printf 'Open a new terminal, or run:  export PATH="%s:$PATH"\n' "$INSTALL_DIR"
+  fi
+}
+
+uninstall_cli() {
+  if [[ -e "$TARGET" ]] && is_our_cli "$TARGET"; then
+    rm -f "$TARGET"
+    printf 'Removed %s\n' "$TARGET"
+  elif [[ -e "$TARGET" ]]; then
+    printf 'Left %s in place because it is not the Spotify Local CLI.\n' "$TARGET"
+  fi
+  if [[ -L "$ALT_TARGET" || -f "$ALT_TARGET" ]]; then
+    if is_our_cli "$ALT_TARGET" || [[ "$(readlink "$ALT_TARGET" 2>/dev/null || true)" == "$BIN_SOURCE" ]]; then
+      rm -f "$ALT_TARGET"
+      printf 'Removed %s\n' "$ALT_TARGET"
+    fi
+  fi
+  remove_path_block
+  printf 'Spotify Local CLI uninstall complete.\n'
+}
+
+case "${1:-}" in
+  ""|--install)
+    install_cli
+    ;;
+  --uninstall)
+    uninstall_cli
+    ;;
+  --help|-h)
+    usage
+    ;;
+  *)
+    printf 'Unknown option: %s\n' "$1" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

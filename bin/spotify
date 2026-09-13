@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Repository-owned `spotify` command.
+# SPOTIFY_LOCAL_CLI=1
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+  NEXT="$(readlink "$SOURCE")"
+  if [[ "$NEXT" != /* ]]; then
+    SOURCE="$DIR/$NEXT"
+  else
+    SOURCE="$NEXT"
+  fi
+done
+
+ROOT="$(cd "$(dirname "$SOURCE")/.." && pwd)"
+exec "$ROOT/scripts/spotify-local" "$@"

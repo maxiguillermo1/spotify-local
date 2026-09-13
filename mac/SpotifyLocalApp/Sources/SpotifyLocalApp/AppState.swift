@@ -1,0 +1,1 @@
+../../../../ios/SpotifyLocal/SpotifyLocal/App/AppState.swift

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Stop only processes owned by Spotify Local.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export SPOTIFY_LOCAL_ROOT="$ROOT"
+# shellcheck source=lib/common.sh
+source "$ROOT/scripts/lib/common.sh"
+spotify_local_init
+
+stopped=0
+pid_file="$(spotify_local_companion_pid_file)"
+if pid="$(spotify_local_read_pid "$pid_file" || true)"; then
+  if spotify_local_pid_alive "$pid"; then
+    comm="$(ps -o comm= -p "$pid" 2>/dev/null || true)"
+    if [[ "$comm" == *SpotifyLocalCompanion* || "$comm" == *spotify* ]]; then
+      kill "$pid" 2>/dev/null || true
+      for _ in 1 2 3 4 5; do
+        spotify_local_pid_alive "$pid" || break
+        sleep 0.1
+      done
+      if spotify_local_pid_alive "$pid"; then
+        kill -TERM "$pid" 2>/dev/null || true
+      fi
+      stopped=1
+    else
+      printf 'Refusing to stop pid %s (%s); it is not the Spotify Local companion.\n' "$pid" "$comm" >&2
+      exit 1
+    fi
+  fi
+  rm -f "$pid_file"
+fi
+
+if spotify_local_mac_app_running; then
+  spotify_local_stop_mac_app
+  stopped=1
+fi
+
+if [[ "$stopped" -eq 1 ]]; then
+  printf 'Spotify Local\n\nStopped.\n'
+else
+  printf 'Spotify Local\n\nNothing to stop.\n'
+fi

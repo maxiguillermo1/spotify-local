@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# Explain how to fix a broken Spotify Local development environment.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export SPOTIFY_LOCAL_ROOT="$ROOT"
+# shellcheck source=lib/common.sh
+source "$ROOT/scripts/lib/common.sh"
+spotify_local_init
+
+failures=0
+
+check() {
+  local label="$1"
+  local ok="$2"
+  local detail="$3"
+  local fix="${4:-}"
+  if [[ "$ok" == "1" ]]; then
+    printf '%s %-22s %s\n' "$(spotify_local_ok)" "$label" "$detail"
+  else
+    failures=$((failures + 1))
+    printf '%s %-22s %s\n' "$(spotify_local_fail)" "$label" "$detail"
+    if [[ -n "$fix" ]]; then
+      printf '    %s\n' "$fix"
+    fi
+  fi
+}
+
+printf 'Spotify Local doctor\n\n'
+
+macos="$(sw_vers -productVersion 2>/dev/null || echo unknown)"
+macos_ok=0
+# Need a recent macOS for current Xcode/simulator stacks.
+IFS=. read -r major _ <<<"$macos"
+if [[ "${major:-0}" -ge 14 ]]; then
+  macos_ok=1
+fi
+check "macOS" "$macos_ok" "$macos" "Install a current macOS release (14+)."
+
+xcode_ok=0
+xcode_detail="not installed"
+xcode_fix="Install Xcode from the App Store, then: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
+if spotify_local_prepare_xcode; then
+  if xcode_out="$(xcodebuild -version 2>/dev/null | head -n 1)"; then
+    xcode_ok=1
+    xcode_detail="$xcode_out"
+    xcode_fix=""
+  fi
+fi
+check "Xcode" "$xcode_ok" "$xcode_detail" "$xcode_fix"
+
+clt_ok=0
+clt_detail="missing"
+if [[ -d /Library/Developer/CommandLineTools ]] || xcode-select -p >/dev/null 2>&1; then
+  clt_ok=1
+  clt_detail="$(xcode-select -p 2>/dev/null || echo present)"
+fi
+check "Command Line Tools" "$clt_ok" "$clt_detail" "Run: xcode-select --install"
+
+sim_ok=0
+sim_detail="unavailable"
+sim_fix="After installing Xcode, run: xcodebuild -downloadPlatform iOS"
+if spotify_local_has_simctl; then
+  if line="$(python3 "$ROOT/scripts/lib/pick_simulator.py" 2>/dev/null)"; then
+    sim_ok=1
+    IFS=$'\t' read -r _ name state <<<"$line"
+    sim_detail="$name ($state)"
+    sim_fix=""
+  else
+    sim_detail="simctl found, no iPhone runtime"
+  fi
+fi
+check "Simulator" "$sim_ok" "$sim_detail" "$sim_fix"
+
+project_ok=0
+project_detail="missing Xcode project"
+if [[ -f "$SPOTIFY_LOCAL_IOS_PROJECT/project.pbxproj" ]]; then
+  project_ok=1
+  project_detail="ios/SpotifyLocal/SpotifyLocal.xcodeproj"
+fi
+check "Project" "$project_ok" "$project_detail" "Re-clone the repository."
+
+cli_ok=0
+cli_detail="not on PATH"
+cli_fix="From the repo: ./scripts/install-cli"
+if command -v spotify >/dev/null 2>&1 && grep -q "SPOTIFY_LOCAL_CLI=1" "$(command -v spotify)" 2>/dev/null; then
+  cli_ok=1
+  cli_detail="$(command -v spotify)"
+  cli_fix=""
+elif command -v spotify-local >/dev/null 2>&1; then
+  cli_ok=1
+  cli_detail="$(command -v spotify-local) (use: spotify-local local)"
+  cli_fix=""
+fi
+check "CLI" "$cli_ok" "$cli_detail" "$cli_fix"
+
+companion_ok=0
+companion_detail="not built"
+if [[ -x "$SPOTIFY_LOCAL_RUN_DIR/companion-build/release/SpotifyLocalCompanion" ]]; then
+  companion_ok=1
+  companion_detail="built"
+elif [[ -d "$SPOTIFY_LOCAL_COMPANION_PACKAGE" ]]; then
+  companion_ok=1
+  companion_detail="sources present"
+fi
+check "Companion" "$companion_ok" "$companion_detail" "Run: spotify local"
+
+music_ok=0
+if mkdir -p "$SPOTIFY_LOCAL_MUSIC_DIR" 2>/dev/null && [[ -d "$SPOTIFY_LOCAL_MUSIC_DIR" ]]; then
+  music_ok=1
+fi
+check "Music folder" "$music_ok" "$(spotify_local_expand_home "$SPOTIFY_LOCAL_MUSIC_DIR")" "Create ~/Desktop/Spotify Local"
+
+conflict_ok=1
+conflict_detail="none"
+if command -v lsof >/dev/null 2>&1; then
+  if lsof -nP -iTCP:5353 -sTCP:LISTEN >/dev/null 2>&1; then
+    conflict_detail="mDNS/Bonjour port 5353 in use (usually normal on macOS)"
+  fi
+fi
+check "Service conflicts" "$conflict_ok" "$conflict_detail" ""
+
+perm_ok=1
+perm_detail="local files only"
+check "Permissions" "$perm_ok" "$perm_detail" ""
+
+printf '\n'
+if [[ "$failures" -eq 0 ]]; then
+  printf 'All checks passed. Run:  spotify local\n'
+  exit 0
+fi
+printf '%s check(s) need attention.\n' "$failures"
+exit 1
